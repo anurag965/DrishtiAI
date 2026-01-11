@@ -1,26 +1,28 @@
 # DrishtiAI
 
-DrishtiAI is an innovative Android application that brings the power of large language models (LLMs) directly to your device. Built with Kotlin and Jetpack Compose, it leverages the llama.cpp library for efficient, on-device AI inference, enabling privacy-focused and offline-capable AI interactions.
+DrishtiAI is a cutting-edge Android application that brings multimodal vision-language AI capabilities directly to your mobile device. Built with privacy-first design, it enables on-device processing of text, images, and videos using advanced vision-language models (VLMs) without requiring internet connectivity.
 
 ## 🚀 Features
 
-- **On-Device AI**: Run LLMs locally without internet dependency
-- **Privacy-First**: All processing happens on your device
-- **Modern UI**: Sleek interface built with Jetpack Compose and Material 3
-- **Vector Database Integration**: Efficient storage and retrieval with SmolVectorDB
-- **Hugging Face Integration**: Easy model downloading via HF Model Hub API
-- **Small Language Models**: Optimized for resource-constrained devices with SmolLM
-- **Cross-Platform Core**: Powered by llama.cpp for broad model support
+- **Multimodal AI Chat**: Engage in conversations with AI that understands both text and visual content
+- **Image & Video Captioning**: Automatically generate descriptions for images and videos using VLMs
+- **Live Video Analysis**: Real-time camera integration for instant vision tasks and analysis
+- **Privacy-First Design**: All processing happens locally on your device - no data leaves your phone
+- **On-Device Inference**: Powered by llama.cpp for efficient, offline AI processing
+- **Vector Database**: SmolVectorDB for intelligent storage and retrieval of embeddings
+- **Model Management**: Seamless downloading and management of AI models via Hugging Face Hub
+- **Modern UI**: Sleek Material 3 interface built with Jetpack Compose
 
 ## 🛠 Tech Stack
 
 - **Language**: Kotlin
-- **UI Framework**: Jetpack Compose
+- **UI Framework**: Jetpack Compose with Material 3
 - **Build System**: Gradle (Kotlin DSL)
-- **AI Engine**: llama.cpp (C++)
-- **Database**: SmolVectorDB
-- **Model Hub**: Hugging Face API
-- **Architecture**: MVVM
+- **AI Engine**: llama.cpp (C++) for optimized inference
+- **Vision Processing**: Custom computer vision pipeline
+- **Database**: SmolVectorDB for vector embeddings
+- **Model Hub**: Hugging Face API integration
+- **Architecture**: MVVM with dependency injection (Koin)
 
 ## 📋 Prerequisites
 
@@ -52,22 +54,28 @@ DrishtiAI is an innovative Android application that brings the power of large la
 
 ## 📖 Usage
 
-1. Launch the DrishtiAI app on your Android device
-2. Download or select a compatible LLM model
-3. Start chatting with the AI locally on your device
-4. Explore vector database features for enhanced interactions
+1. **Launch the App**: Open DrishtiAI on your Android device
+2. **Download Models**: If no models are available, the app will guide you to download compatible VLMs
+3. **Start Chatting**: Use the chat interface for text-based conversations with AI
+4. **Vision Tasks**: Access camera features for image/video analysis and captioning
+5. **Live Analysis**: Enable camera permissions for real-time vision processing
 
 ## 🏛 Project Structure
 
 ```
 DrishtiAI/
-├── app/                    # Main Android application
-├── hf-model-hub-api/       # Hugging Face model integration
-├── smollm/                 # Small Language Model module
-├── smolvectordb/           # Vector database implementation
-├── llama.cpp/              # Core AI inference library
-├── build.gradle.kts        # Root build configuration
-└── settings.gradle.kts     # Project settings
+├── app/                          # Main Android application
+│   ├── src/main/java/com/example/drishtiai/
+│   │   ├── MainActivity.kt       # App entry point and model loading
+│   │   ├── VideoCaptionActivity.kt # Image/video captioning interface
+│   │   ├── ui/screens/           # UI screens (chat, model download, etc.)
+│   │   └── llm/                  # Language model management
+├── hf-model-hub-api/             # Hugging Face model integration
+├── smollm/                       # Small Language Model implementation
+├── smolvectordb/                 # Vector database for embeddings
+├── llama.cpp/                    # Core AI inference library
+├── build.gradle.kts              # Root build configuration
+└── settings.gradle.kts           # Project settings
 ```
 
 ## 🤝 Contributing
@@ -86,9 +94,10 @@ This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENS
 
 ## 🙏 Acknowledgments
 
-- [llama.cpp](https://github.com/ggerganov/llama.cpp) for the core inference engine
-- [Hugging Face](https://huggingface.co) for model hosting
+- [llama.cpp](https://github.com/ggerganov/llama.cpp) for the optimized inference engine
+- [Hugging Face](https://huggingface.co) for the model ecosystem
 - [Jetpack Compose](https://developer.android.com/jetpack/compose) for modern Android UI
+- The open-source AI community for advancing multimodal models
 
 ## 📞 Support
 
