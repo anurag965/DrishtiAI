@@ -2,7 +2,16 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        tools:ignore="ScopedStorage" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.CAMERA" />
+
     <application
+        android:name=".DrishtiAIApplication"
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
@@ -10,18 +19,47 @@
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
-        android:theme="@style/Theme.DrishtiAI">
+        android:theme="@style/Theme.SmolLMAndroid"
+        android:localeConfig="@xml/locales_config"
+        tools:targetApi="31">
+
         <activity
             android:name=".MainActivity"
             android:exported="true"
-            android:label="@string/app_name"
-            android:theme="@style/Theme.DrishtiAI">
+            android:theme="@style/Theme.SmolLMAndroid">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
-
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <activity
+            android:label="💬 LLM"
+            android:name=".ui.screens.chat.ChatActivity"
+            android:exported="true">
+            <!-- This intent-filter is used to receive text from other apps -->
+            <!-- The received text is then sent to a new chat -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+        </activity>
+
+        <activity android:name=".ui.screens.model_download.DownloadModelActivity" />
+
+        <activity android:name=".ui.screens.manage_tasks.ManageTasksActivity" />
+
+        <activity android:name=".ui.screens.livevideo.LiveVideoActivity"
+            android:label="Live Video Inference"
+            />
+
+        <!-- SmolVLM2 video caption activity -->
+        <activity
+            android:name=".VideoCaptionActivity"
+            android:exported="true"
+            android:label="🎬 Video Analysis"
+            android:theme="@style/Theme.AppCompat.Light.NoActionBar"/>
     </application>
 
 </manifest>
