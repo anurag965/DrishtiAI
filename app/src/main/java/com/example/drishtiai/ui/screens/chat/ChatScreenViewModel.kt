@@ -541,8 +541,8 @@ class ChatScreenViewModel(
 
         val currentTime = System.currentTimeMillis()
         
-        // Sampling rate for stability check (faster: 250ms)
-        if (currentTime - lastFrameTime < 250) return 
+        // Rapid Sampling: Check for stability every 150ms
+        if (currentTime - lastFrameTime < 150) return 
         lastFrameTime = currentTime
 
         if (isProcessingFrame.compareAndSet(false, true)) {
@@ -550,25 +550,22 @@ class ChatScreenViewModel(
                 try {
                     val currentThumbnail = withContext(Dispatchers.Default) { getThumbnail(bitmap) }
                     
-                    // Stability Check Logic:
-                    // 1. Compare current frame with the immediate previous one to see if camera is MOVING
-                    // threshold relaxed to 0.12 for more natural phone movement
-                    val isMoving = lastStaticFrameThumbnail != null && !isSimilar(currentThumbnail, lastStaticFrameThumbnail!!, threshold = 0.12)
+                    // Ultra-fast Stability Detection:
+                    // 1. Is the camera moving? (relaxed threshold for hand movement)
+                    val isMoving = lastStaticFrameThumbnail != null && !isSimilar(currentThumbnail, lastStaticFrameThumbnail!!, threshold = 0.15)
                     
                     if (isMoving) {
-                        // Camera is moving, reset the stability timer
                         staticFrameStartTime = currentTime
                         lastStaticFrameThumbnail = currentThumbnail
                         return@launch
                     }
 
-                    // 2. If camera is NOT moving, check how long it has been still
+                    // 2. Minimal Stillness Duration: only 150ms of steady hands required
                     val stillnessDuration = currentTime - staticFrameStartTime
                     
-                    // 3. If camera has been still for > 400ms (faster!), it's a good candidate for a keyframe
-                    if (stillnessDuration > 400) {
-                        // 4. Finally, ensure this stable frame is DIFFERENT from our last captured keyframe
-                        val isNewScene = lastFrameThumbnail == null || !isSimilar(currentThumbnail, lastFrameThumbnail!!, threshold = 0.22)
+                    if (stillnessDuration > 150) {
+                        // 3. New Scene Check: must be different from previous keyframe
+                        val isNewScene = lastFrameThumbnail == null || !isSimilar(currentThumbnail, lastFrameThumbnail!!, threshold = 0.20)
                         
                         if (isNewScene) {
                             val scaledBitmap = withContext(Dispatchers.Default) {
@@ -578,7 +575,7 @@ class ChatScreenViewModel(
 
                             withContext(Dispatchers.IO) {
                                 lastFrameThumbnail = currentThumbnail
-                                staticFrameStartTime = currentTime // Reset to avoid double capture
+                                staticFrameStartTime = currentTime 
                                 
                                 val currentFrames = _videoPreviewBitmaps.value.toMutableList()
                                 if (currentFrames.size >= 4) {
