@@ -25,6 +25,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.graphics.Paint
 import android.net.Uri
 import android.os.Bundle
 import android.provider.MediaStore
@@ -61,8 +62,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -101,6 +106,9 @@ import kotlinx.serialization.Serializable
 import org.koin.android.ext.android.inject
 import java.util.*
 import java.util.concurrent.Executors
+import kotlin.math.abs
+import kotlin.math.max
+import kotlin.math.min
 import kotlin.reflect.typeOf
 
 private const val LOGTAG = "[ChatActivity-Kt]"
@@ -400,6 +408,7 @@ fun CameraPreview(
 @Composable
 private fun MediaPreview(viewModel: ChatScreenViewModel) {
     val previews by viewModel.videoPreviewBitmaps.collectAsStateWithLifecycle()
+    val detectedCrises by viewModel.detectedCrises.collectAsStateWithLifecycle()
     val isProcessing by viewModel.isProcessingMedia.collectAsStateWithLifecycle()
     val processingText by viewModel.mediaProcessingProgressText.collectAsStateWithLifecycle()
 
@@ -411,15 +420,57 @@ private fun MediaPreview(viewModel: ChatScreenViewModel) {
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 items(previews) { bitmap ->
-                    Image(
-                        bitmap = bitmap.asImageBitmap(),
-                        contentDescription = "Keyframe",
-                        modifier = Modifier
-                            .fillMaxHeight()
-                            .aspectRatio(1f)
-                            .clip(RoundedCornerShape(8.dp)),
-                        contentScale = ContentScale.Crop
-                    )
+                    Box(modifier = Modifier
+                        .fillMaxHeight()
+                        .aspectRatio(1f)
+                        .clip(RoundedCornerShape(8.dp))) {
+                        Image(
+                            bitmap = bitmap.asImageBitmap(),
+                            contentDescription = "Keyframe",
+                            modifier = Modifier.fillMaxSize(),
+                            contentScale = ContentScale.Crop
+                        )
+                        
+                        // Overlay Bounding Boxes
+                        Canvas(modifier = Modifier.fillMaxSize()) {
+                            detectedCrises.forEach { crisis ->
+                                val box = crisis.boundingBox
+                                
+                                // Fix: coordinates are sometimes swapped or out of order
+                                val xMin = min(box[0], box[2])
+                                val xMax = max(box[0], box[2])
+                                val yMin = min(box[1], box[3])
+                                val yMax = max(box[1], box[3])
+
+                                // Coordinates mapping (assumes 0-1000 scale)
+                                val left = (xMin / 1000f) * size.width
+                                val top = (yMin / 1000f) * size.height
+                                val width = ((xMax - xMin) / 1000f) * size.width
+                                val height = ((yMax - yMin) / 1000f) * size.height
+                                
+                                drawRect(
+                                    color = Color.Red,
+                                    topLeft = Offset(left, top),
+                                    size = Size(width, height),
+                                    style = Stroke(width = 2.dp.toPx())
+                                )
+
+                                // Draw Class Name Label
+                                val paint = Paint().apply {
+                                    color = Color.Red.toArgb()
+                                    textSize = 12.sp.toPx()
+                                    isAntiAlias = true
+                                    style = Paint.Style.FILL
+                                }
+                                drawContext.canvas.nativeCanvas.drawText(
+                                    crisis.className,
+                                    left,
+                                    max(top - 5.dp.toPx(), 15.dp.toPx()),
+                                    paint
+                                )
+                            }
+                        }
+                    }
                 }
             }
             IconButton(

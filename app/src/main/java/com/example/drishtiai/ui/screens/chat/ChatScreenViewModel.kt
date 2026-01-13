@@ -67,6 +67,11 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
 import kotlin.math.pow
 
+data class DetectedCrisis(
+    val className: String,
+    val boundingBox: List<Float> // [x1, y1, x2, y2] normalized 0-1000
+)
+
 private const val LOGTAG = "[SmolLMAndroid-Kt]"
 private val LOGD: (String) -> Unit = { Log.d(LOGTAG, it) }
 
@@ -132,6 +137,9 @@ class ChatScreenViewModel(
     private val _videoPreviewBitmaps = MutableStateFlow<List<Bitmap>>(emptyList())
     val videoPreviewBitmaps: StateFlow<List<Bitmap>> = _videoPreviewBitmaps
 
+    private val _detectedCrises = MutableStateFlow<List<DetectedCrisis>>(emptyList())
+    val detectedCrises: StateFlow<List<DetectedCrisis>> = _detectedCrises
+
     private val _isProcessingMedia = MutableStateFlow(false)
     val isProcessingMedia: StateFlow<Boolean> = _isProcessingMedia
 
@@ -139,20 +147,19 @@ class ChatScreenViewModel(
     val mediaProcessingProgressText: StateFlow<String> = _mediaProcessingProgressText
 
     // Used to pre-set a value in the query text-field of the chat screen
-    // It is set when a query comes from a 'share-text' intent in ChatActivity
     var questionTextDefaultVal: String? = null
 
-    // regex to replace <think> tags with <blockquote>
-    // to render them correctly in Markdown
     private val findThinkTagRegex = Regex("<think>(.*?)</think>", RegexOption.DOT_MATCHES_ALL)
+    
+    // Support formats: [Fight] [100, 200, 300, 400] OR [100, 200, 300, 400]
+    private val boundingBoxRegex = Regex("\\[(.*?)\\]\\s*[\\[\\(]?(\\d+),\\s*(\\d+),\\s*(\\d+),\\s*(\\d+)[\\)\\]]?|\\[(\\d+),\\s*(\\d+),\\s*(\\d+),\\s*(\\d+)\\]")
+    
     var responseGenerationsSpeed: Float? = null
     var responseGenerationTimeSecs: Int? = null
     val markwon: Markwon
 
     private var activityManager: ActivityManager
     private val videoFrameExtractor by lazy { VideoFrameExtractor(context) }
-    
-    // Speed Optimization: Use 224 for mobile VLM inference
     private val INFERENCE_IMAGE_SIZE = 224 
 
     init {
@@ -203,11 +210,8 @@ class ChatScreenViewModel(
             .toInt()
 
     fun getChats(): Flow<List<Chat>> = appDB.getChats()
-
     fun getChatMessages(chatId: Long): Flow<List<ChatMessage>> = appDB.getMessages(chatId)
-
     fun getFolders(): Flow<List<Folder>> = appDB.getFolders()
-
     fun getChatsForFolder(folderId: Long): Flow<List<Chat>> = appDB.getChatsForFolder(folderId)
 
     fun updateChatLLMParams(modelId: Long, chatTemplate: String) {
@@ -235,112 +239,6 @@ class ChatScreenViewModel(
         appDB.deleteMessage(messageId)
     }
 
-    fun sendUserQuery(query: String, addMessageToDB: Boolean = true, clearResponse: Boolean = true) {
-        _currChatState.value?.let { chat ->
-            chat.dateUsed = Date()
-            appDB.updateChat(chat)
-
-            if (chat.isTask) {
-                appDB.deleteMessages(chat.id)
-            }
-
-            if (addMessageToDB) {
-                appDB.addUserMessage(chat.id, query)
-            }
-            _isGeneratingResponse.value = true
-            if (clearResponse) {
-                _partialResponse.value = ""
-            }
-
-            val model = modelsRepository.getModelFromId(chat.llmModelId)
-            if (model != null && model.mmProjPath.isNotEmpty()) {
-                // Multimodal inference with streaming
-                smolLMManager.getResponseMultimodal(
-                    query,
-                    onPartialResponseGenerated = {
-                        CoroutineScope(Dispatchers.Main).launch {
-                            _partialResponse.value = it
-                        }
-                    },
-                    onSuccess = { response ->
-                        _isGeneratingResponse.value = false
-                        if (addMessageToDB) {
-                            appDB.addAssistantMessage(chat.id, response)
-                        }
-                        if (clearResponse) {
-                            _partialResponse.value = ""
-                        }
-                    },
-                    onCancelled = { final ->
-                        _isGeneratingResponse.value = false
-                        if (addMessageToDB && final.isNotEmpty()) {
-                            appDB.addAssistantMessage(chat.id, final)
-                        }
-                    },
-                    onError = { exception ->
-                        _isGeneratingResponse.value = false
-                        if (addMessageToDB) {
-                            Toast.makeText(context, "Error: ${exception.message}", Toast.LENGTH_SHORT).show()
-                        }
-                    }
-                )
-            } else {
-                // Text-only inference
-                var accumulatedResponse = ""
-                smolLMManager.getResponse(
-                    query,
-                    responseTransform = {
-                        findThinkTagRegex.replace(it) { matchResult ->
-                            "<blockquote><i><h6>${matchResult.groupValues[1].trim()}</i></h6></blockquote>"
-                        }
-                    },
-                    onPartialResponseGenerated = {
-                        CoroutineScope(Dispatchers.Main).launch {
-                            accumulatedResponse = it
-                            _partialResponse.value = accumulatedResponse
-                        }
-                    },
-                    onSuccess = { response ->
-                        _isGeneratingResponse.value = false
-                        responseGenerationsSpeed = response.generationSpeed
-                        responseGenerationTimeSecs = response.generationTimeSecs
-                        appDB.updateChat(chat.copy(contextSizeConsumed = response.contextLengthUsed))
-                    },
-                    onCancelled = { final ->
-                        // Save the partial response to DB even if cancelled
-                        if (addMessageToDB && final.isNotEmpty()) {
-                            appDB.addAssistantMessage(chat.id, final)
-                        }
-                        _isGeneratingResponse.value = false
-                    },
-                    onError = { exception ->
-                        _isGeneratingResponse.value = false
-                        createAlertDialog(
-                            dialogTitle = "An error occurred",
-                            dialogText =
-                            "The app is unable to process the query. The error message is: ${exception.message}",
-                            dialogPositiveButtonText = "Change model",
-                            onPositiveButtonClick = {},
-                            dialogNegativeButtonText = "",
-                            onNegativeButtonClick = {},
-                        )
-                    },
-                )
-            }
-        }
-    }
-
-    fun stopGeneration() {
-        smolLMManager.stopResponseGeneration()
-        // Note: _isGeneratingResponse and _partialResponse are handled in the onCancelled callback of getResponse
-    }
-
-    fun switchChat(chat: Chat) {
-        stopGeneration()
-        _currChatState.value = chat
-        loadModel()
-    }
-
     fun deleteChat(chat: Chat) {
         stopGeneration()
         appDB.deleteChat(chat)
@@ -358,6 +256,99 @@ class ChatScreenViewModel(
         if (_currChatState.value?.llmModelId == modelId) {
             _currChatState.value = _currChatState.value?.copy(llmModelId = -1)
         }
+    }
+
+    fun sendUserQuery(query: String, addMessageToDB: Boolean = true, clearResponse: Boolean = true) {
+        _currChatState.value?.let { chat ->
+            chat.dateUsed = Date()
+            appDB.updateChat(chat)
+
+            if (chat.isTask) appDB.deleteMessages(chat.id)
+            if (addMessageToDB) appDB.addUserMessage(chat.id, query)
+            
+            _isGeneratingResponse.value = true
+            if (clearResponse) _partialResponse.value = ""
+            _detectedCrises.value = emptyList()
+
+            val model = modelsRepository.getModelFromId(chat.llmModelId)
+            if (model != null && model.mmProjPath.isNotEmpty()) {
+                smolLMManager.getResponseMultimodal(
+                    query,
+                    onPartialResponseGenerated = {
+                        CoroutineScope(Dispatchers.Main).launch {
+                            _partialResponse.value = it
+                            parseDetectedCrises(it)
+                        }
+                    },
+                    onSuccess = { response ->
+                        _isGeneratingResponse.value = false
+                        if (addMessageToDB) appDB.addAssistantMessage(chat.id, response)
+                        if (clearResponse) _partialResponse.value = ""
+                    },
+                    onCancelled = { final ->
+                        _isGeneratingResponse.value = false
+                        if (addMessageToDB && final.isNotEmpty()) appDB.addAssistantMessage(chat.id, final)
+                    },
+                    onError = { exception ->
+                        _isGeneratingResponse.value = false
+                        if (addMessageToDB) Toast.makeText(context, "Error: ${exception.message}", Toast.LENGTH_SHORT).show()
+                    }
+                )
+            } else {
+                var accumulatedResponse = ""
+                smolLMManager.getResponse(
+                    query,
+                    responseTransform = { it },
+                    onPartialResponseGenerated = {
+                        CoroutineScope(Dispatchers.Main).launch {
+                            accumulatedResponse = it
+                            _partialResponse.value = it
+                        }
+                    },
+                    onSuccess = { response ->
+                        _isGeneratingResponse.value = false
+                        responseGenerationsSpeed = response.generationSpeed
+                        responseGenerationTimeSecs = response.generationTimeSecs
+                        appDB.updateChat(chat.copy(contextSizeConsumed = response.contextLengthUsed))
+                    },
+                    onCancelled = { _isGeneratingResponse.value = false },
+                    onError = { _isGeneratingResponse.value = false },
+                )
+            }
+        }
+    }
+
+    private fun parseDetectedCrises(text: String) {
+        val crises = mutableListOf<DetectedCrisis>()
+        boundingBoxRegex.findAll(text).forEach { match ->
+            if (match.groupValues[2].isNotEmpty()) {
+                // Format: [Class] [x1, y1, x2, y2]
+                val className = match.groupValues[1]
+                val x1 = match.groupValues[2].toFloat()
+                val y1 = match.groupValues[3].toFloat()
+                val x2 = match.groupValues[4].toFloat()
+                val y2 = match.groupValues[5].toFloat()
+                crises.add(DetectedCrisis(className, listOf(x1, y1, x2, y2)))
+            } else if (match.groupValues[6].isNotEmpty()) {
+                // Format: [x1, y1, x2, y2]
+                val x1 = match.groupValues[6].toFloat()
+                val y1 = match.groupValues[7].toFloat()
+                val x2 = match.groupValues[8].toFloat()
+                val y2 = match.groupValues[9].toFloat()
+                crises.add(DetectedCrisis("Detection", listOf(x1, y1, x2, y2)))
+            }
+        }
+        _detectedCrises.value = crises
+    }
+
+    fun stopGeneration() {
+        smolLMManager.stopResponseGeneration()
+    }
+
+    fun switchChat(chat: Chat) {
+        stopGeneration()
+        _currChatState.value = chat
+        loadModel()
     }
 
     fun loadModel(onComplete: (ModelLoadingState) -> Unit = {}) {
@@ -391,21 +382,6 @@ class ChatScreenViewModel(
                                 onError = { e ->
                                     _modelLoadState.value = ModelLoadingState.FAILURE
                                     onComplete(ModelLoadingState.FAILURE)
-                                    createAlertDialog(
-                                        dialogTitle = context.getString(R.string.dialog_err_title),
-                                        dialogText = context.getString(R.string.dialog_err_text, e.message),
-                                        dialogPositiveButtonText =
-                                        context.getString(R.string.dialog_err_change_model),
-                                        onPositiveButtonClick = {
-                                            onEvent(
-                                                ChatScreenUIEvent.DialogEvents.ToggleSelectModelListDialog(
-                                                    visible = true
-                                                )
-                                            )
-                                        },
-                                        dialogNegativeButtonText = context.getString(R.string.dialog_err_close),
-                                        onNegativeButtonClick = {},
-                                    )
                                 },
                                 onSuccess = {
                                     _modelLoadState.value = ModelLoadingState.SUCCESS
@@ -417,21 +393,6 @@ class ChatScreenViewModel(
                         withContext(Dispatchers.Main) {
                             _modelLoadState.value = ModelLoadingState.FAILURE
                             onComplete(ModelLoadingState.FAILURE)
-                            createAlertDialog(
-                                dialogTitle = context.getString(R.string.dialog_err_title),
-                                dialogText = context.getString(R.string.dialog_err_text, e.message),
-                                dialogPositiveButtonText =
-                                context.getString(R.string.dialog_err_change_model),
-                                onPositiveButtonClick = {
-                                    onEvent(
-                                        ChatScreenUIEvent.DialogEvents.ToggleSelectModelListDialog(
-                                            visible = true
-                                        )
-                                    )
-                                },
-                                dialogNegativeButtonText = context.getString(R.string.dialog_err_close),
-                                onNegativeButtonClick = {},
-                            )
                         }
                     }
                 }
@@ -477,49 +438,30 @@ class ChatScreenViewModel(
 
     fun onEvent(event: ChatScreenUIEvent) {
         when (event) {
-            is ChatScreenUIEvent.DialogEvents.ToggleSelectModelListDialog -> {
-                _showSelectModelListDialogState.value = event.visible
-            }
-
-            is ChatScreenUIEvent.DialogEvents.ToggleMoreOptionsPopup -> {
-                _showMoreOptionsPopupState.value = event.visible
-            }
-
-            is ChatScreenUIEvent.DialogEvents.ToggleTaskListBottomList -> {
-                _showTaskListBottomListState.value = event.visible
-            }
-
-            is ChatScreenUIEvent.DialogEvents.ToggleChangeFolderDialog -> {
-                _showChangeFolderDialogState.value = event.visible
-            }
-
+            is ChatScreenUIEvent.DialogEvents.ToggleSelectModelListDialog -> _showSelectModelListDialogState.value = event.visible
+            is ChatScreenUIEvent.DialogEvents.ToggleMoreOptionsPopup -> _showMoreOptionsPopupState.value = event.visible
+            is ChatScreenUIEvent.DialogEvents.ToggleTaskListBottomList -> _showTaskListBottomListState.value = event.visible
+            is ChatScreenUIEvent.DialogEvents.ToggleChangeFolderDialog -> _showChangeFolderDialogState.value = event.visible
             else -> {}
         }
     }
 
-    fun toggleRAMUsageLabelVisibility() {
-        _showRAMUsageLabel.value = !_showRAMUsageLabel.value
-    }
-
-    fun setVideoPreviewBitmaps(bitmaps: List<Bitmap>) {
-        _videoPreviewBitmaps.value = bitmaps
-    }
-
+    fun toggleRAMUsageLabelVisibility() = run { _showRAMUsageLabel.value = !_showRAMUsageLabel.value }
+    fun setVideoPreviewBitmaps(bitmaps: List<Bitmap>) { _videoPreviewBitmaps.value = bitmaps }
     fun setProcessingMedia(processing: Boolean, text: String = "") {
         _isProcessingMedia.value = processing
         _mediaProcessingProgressText.value = text
     }
 
     fun addVideoFrame(rgbData: ByteArray, width: Int, height: Int) {
-        viewModelScope.launch(Dispatchers.IO) {
-            smolLMManager.addVideoFrameRGB(rgbData, width, height)
-        }
+        viewModelScope.launch(Dispatchers.IO) { smolLMManager.addVideoFrameRGB(rgbData, width, height) }
     }
 
     fun clearVideoFrames() {
         viewModelScope.launch(Dispatchers.IO) {
             smolLMManager.clearFrames()
             _videoPreviewBitmaps.value = emptyList()
+            _detectedCrises.value = emptyList()
             lastFrameThumbnail = null
             lastStaticFrameThumbnail = null
         }
@@ -532,16 +474,11 @@ class ChatScreenViewModel(
     private var staticFrameStartTime = 0L
     private val isProcessingFrame = AtomicBoolean(false)
 
-    fun setLiveQuery(query: String) {
-        _liveQuery.value = query
-    }
+    fun setLiveQuery(query: String) { _liveQuery.value = query }
 
     fun onLiveFrame(bitmap: Bitmap) {
         if (_isGeneratingResponse.value) return
-
         val currentTime = System.currentTimeMillis()
-        
-        // Rapid Sampling: Check for stability every 150ms
         if (currentTime - lastFrameTime < 150) return 
         lastFrameTime = currentTime
 
@@ -549,9 +486,6 @@ class ChatScreenViewModel(
             viewModelScope.launch {
                 try {
                     val currentThumbnail = withContext(Dispatchers.Default) { getThumbnail(bitmap) }
-                    
-                    // Ultra-fast Stability Detection:
-                    // 1. Is the camera moving? (relaxed threshold for hand movement)
                     val isMoving = lastStaticFrameThumbnail != null && !isSimilar(currentThumbnail, lastStaticFrameThumbnail!!, threshold = 0.15)
                     
                     if (isMoving) {
@@ -560,13 +494,9 @@ class ChatScreenViewModel(
                         return@launch
                     }
 
-                    // 2. Minimal Stillness Duration: only 150ms of steady hands required
                     val stillnessDuration = currentTime - staticFrameStartTime
-                    
                     if (stillnessDuration > 150) {
-                        // 3. New Scene Check: must be different from previous keyframe
                         val isNewScene = lastFrameThumbnail == null || !isSimilar(currentThumbnail, lastFrameThumbnail!!, threshold = 0.20)
-                        
                         if (isNewScene) {
                             val scaledBitmap = withContext(Dispatchers.Default) {
                                 Bitmap.createScaledBitmap(bitmap, INFERENCE_IMAGE_SIZE, INFERENCE_IMAGE_SIZE, false)
@@ -576,7 +506,6 @@ class ChatScreenViewModel(
                             withContext(Dispatchers.IO) {
                                 lastFrameThumbnail = currentThumbnail
                                 staticFrameStartTime = currentTime 
-                                
                                 val currentFrames = _videoPreviewBitmaps.value.toMutableList()
                                 if (currentFrames.size >= 4) {
                                     currentFrames.removeAt(0)
@@ -591,7 +520,6 @@ class ChatScreenViewModel(
                             }
                         }
                     }
-                    
                     lastStaticFrameThumbnail = currentThumbnail
                 } finally {
                     isProcessingFrame.set(false)
@@ -603,38 +531,19 @@ class ChatScreenViewModel(
     fun processVideoFile(uri: Uri) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                withContext(Dispatchers.Main) {
-                    setProcessingMedia(true, "Extracting keyframes...")
-                }
-                
+                withContext(Dispatchers.Main) { setProcessingMedia(true, "Extracting keyframes...") }
                 smolLMManager.clearFrames()
                 val frames = videoFrameExtractor.extractFrames(uri, numFrames = 4, targetSize = INFERENCE_IMAGE_SIZE)
-                
                 if (frames.isNotEmpty()) {
                     val bitmaps = frames.map { rgbToBitmap(it, INFERENCE_IMAGE_SIZE, INFERENCE_IMAGE_SIZE) }
-                    withContext(Dispatchers.Main) {
-                        setVideoPreviewBitmaps(bitmaps)
-                    }
-                    
-                    for (frame in frames) {
-                        smolLMManager.addVideoFrameRGB(frame, INFERENCE_IMAGE_SIZE, INFERENCE_IMAGE_SIZE)
-                    }
-                    
-                    withContext(Dispatchers.Main) {
-                        setProcessingMedia(false, "Video loaded (${frames.size} keyframes)")
-                        Toast.makeText(context, "Keyframes extracted successfully", Toast.LENGTH_SHORT).show()
-                    }
+                    withContext(Dispatchers.Main) { setVideoPreviewBitmaps(bitmaps) }
+                    for (frame in frames) smolLMManager.addVideoFrameRGB(frame, INFERENCE_IMAGE_SIZE, INFERENCE_IMAGE_SIZE)
+                    withContext(Dispatchers.Main) { setProcessingMedia(false, "Video loaded") }
                 } else {
-                    withContext(Dispatchers.Main) {
-                        Toast.makeText(context, "No keyframes could be extracted", Toast.LENGTH_SHORT).show()
-                        setProcessingMedia(false)
-                    }
+                    withContext(Dispatchers.Main) { setProcessingMedia(false) }
                 }
             } catch (e: Exception) {
-                withContext(Dispatchers.Main) {
-                    Toast.makeText(context, "Error processing video: ${e.message}", Toast.LENGTH_SHORT).show()
-                    setProcessingMedia(false)
-                }
+                withContext(Dispatchers.Main) { setProcessingMedia(false) }
             }
         }
     }
@@ -642,25 +551,17 @@ class ChatScreenViewModel(
     fun processImageFile(uri: Uri) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                withContext(Dispatchers.Main) {
-                    setProcessingMedia(true, "Processing image...")
-                }
-                
+                withContext(Dispatchers.Main) { setProcessingMedia(true, "Processing image...") }
                 val bitmap = MediaStore.Images.Media.getBitmap(context.contentResolver, uri)
                 val scaled = Bitmap.createScaledBitmap(bitmap, INFERENCE_IMAGE_SIZE, INFERENCE_IMAGE_SIZE, false)
-                
                 smolLMManager.clearFrames()
                 smolLMManager.addVideoFrameRGB(bitmapToRgb(scaled), INFERENCE_IMAGE_SIZE, INFERENCE_IMAGE_SIZE)
-                
                 withContext(Dispatchers.Main) {
                     setVideoPreviewBitmaps(listOf(scaled))
-                    setProcessingMedia(false, "Image loaded")
-                }
-            } catch (e: Exception) {
-                withContext(Dispatchers.Main) {
-                    Toast.makeText(context, "Error processing image: ${e.message}", Toast.LENGTH_SHORT).show()
                     setProcessingMedia(false)
                 }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) { setProcessingMedia(false) }
             }
         }
     }
@@ -672,10 +573,7 @@ class ChatScreenViewModel(
 
     private fun isSimilar(f1: ByteArray, f2: ByteArray, threshold: Double = 0.20): Boolean {
         var diff = 0.0
-        for (i in f1.indices) {
-            // Fix: Use 'and 0xFF' to treat as unsigned bytes (0-255)
-            diff += abs((f1[i].toInt() and 0xFF) - (f2[i].toInt() and 0xFF))
-        }
+        for (i in f1.indices) diff += abs((f1[i].toInt() and 0xFF) - (f2[i].toInt() and 0xFF))
         return (diff / (f1.size * 255.0)) < threshold
     }
 
@@ -686,10 +584,10 @@ class ChatScreenViewModel(
         bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
         val bytes = ByteArray(width * height * 3)
         for (i in pixels.indices) {
-            val pixel = pixels[i]
-            bytes[i * 3] = ((pixel shr 16) and 0xFF).toByte()
-            bytes[i * 3 + 1] = ((pixel shr 8) and 0xFF).toByte()
-            bytes[i * 3 + 2] = (pixel and 0xFF).toByte()
+            val p = pixels[i]
+            bytes[i * 3] = ((p shr 16) and 0xFF).toByte()
+            bytes[i * 3 + 1] = ((p shr 8) and 0xFF).toByte()
+            bytes[i * 3 + 2] = (p and 0xFF).toByte()
         }
         return bytes
     }
