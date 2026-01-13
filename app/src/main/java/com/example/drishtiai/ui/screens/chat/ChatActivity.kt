@@ -44,13 +44,11 @@ import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.animation.*
-import androidx.compose.foundation.ExperimentalFoundationApi
-import androidx.compose.foundation.Image
-import androidx.compose.foundation.background
-import androidx.compose.foundation.border
+import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyItemScope
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
@@ -86,7 +84,6 @@ import androidx.navigation.toRoute
 import compose.icons.FeatherIcons
 import compose.icons.feathericons.*
 import com.example.drishtiai.R
-import com.example.drishtiai.VideoFrameExtractor
 import com.example.drishtiai.data.Chat
 import com.example.drishtiai.data.Task
 import com.example.drishtiai.ui.components.*
@@ -98,11 +95,8 @@ import com.example.drishtiai.ui.screens.chat.dialogs.createChatMessageOptionsDia
 import com.example.drishtiai.ui.screens.livevideo.FrameAnalyzer
 import com.example.drishtiai.ui.screens.manage_tasks.ManageTasksActivity
 import com.example.drishtiai.ui.theme.SmolLMAndroidTheme
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import org.koin.android.ext.android.inject
 import java.util.*
@@ -110,7 +104,6 @@ import java.util.concurrent.Executors
 import kotlin.reflect.typeOf
 
 private const val LOGTAG = "[ChatActivity-Kt]"
-private val LOGD: (String) -> Unit = { Log.d(LOGTAG, it) }
 
 @Serializable
 object ChatRoute
@@ -121,8 +114,6 @@ data class EditChatSettingsRoute(val chat: Chat, val modelContextSize: Int)
 class ChatActivity : ComponentActivity() {
     private val viewModel: ChatScreenViewModel by inject()
     private var modelUnloaded = false
-    private lateinit var speechRecognizer: SpeechRecognizer
-    private var isListening by mutableStateOf(false)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -167,20 +158,7 @@ class ChatActivity : ComponentActivity() {
                                             modelContextSize,
                                         )
                                     )
-                                },
-                                onSpeechToTextClick = {
-                                    if (isListening) {
-                                        speechRecognizer.stopListening()
-                                    } else {
-                                        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                                            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                                            putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault().toLanguageTag())
-                                            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-                                        }
-                                        speechRecognizer.startListening(intent)
-                                    }
-                                },
-                                isSpeechToTextListening = isListening
+                                }
                             )
                         }
                     }
@@ -193,14 +171,12 @@ class ChatActivity : ComponentActivity() {
         super.onStart()
         if (modelUnloaded) {
             viewModel.loadModel()
-            LOGD("onStart() called - model loaded")
         }
     }
 
     override fun onStop() {
         super.onStop()
         modelUnloaded = viewModel.unloadModel()
-        LOGD("onStop() called - model unloaded result: $modelUnloaded")
     }
 }
 
@@ -208,9 +184,7 @@ class ChatActivity : ComponentActivity() {
 @Composable
 fun ChatActivityScreenUI(
     viewModel: ChatScreenViewModel,
-    onEditChatParamsClick: (Chat, Int) -> Unit,
-    onSpeechToTextClick: () -> Unit,
-    isSpeechToTextListening: Boolean
+    onEditChatParamsClick: (Chat, Int) -> Unit
 ) {
     val currChat by viewModel.currChatState.collectAsStateWithLifecycle()
     
@@ -335,10 +309,8 @@ private fun ScreenContent(viewModel: ChatScreenViewModel, currChat: Chat) {
                 }
             }
 
-            Spacer(Modifier.height(8.dp))
-
-            val mediaVisible = isLiveCameraEnabled || viewModel.videoPreviewBitmap.collectAsStateWithLifecycle().value != null
-            if (mediaVisible) {
+            if (isLiveCameraEnabled && hasCameraPermission) {
+                Spacer(Modifier.height(8.dp))
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -346,19 +318,30 @@ private fun ScreenContent(viewModel: ChatScreenViewModel, currChat: Chat) {
                         .clip(RoundedCornerShape(16.dp))
                         .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(16.dp))
                 ) {
-                    if (isLiveCameraEnabled && hasCameraPermission) {
-                        CameraPreview(
-                            modifier = Modifier.fillMaxSize(),
-                            viewModel = viewModel,
-                            isInferring = isInferring
-                        )
-                        // Overlay for inference indicator
-                        if (isInferring) {
-                            Box(modifier = Modifier.align(Alignment.TopEnd).padding(8.dp).size(12.dp).background(Color.Red, CircleShape))
-                        }
-                    } else {
-                        MediaPreview(viewModel)
+                    CameraPreview(
+                        modifier = Modifier.fillMaxSize(),
+                        viewModel = viewModel,
+                        isInferring = isInferring
+                    )
+                    if (isInferring) {
+                        Box(modifier = Modifier.align(Alignment.TopEnd).padding(8.dp).size(12.dp).background(Color.Red, CircleShape))
                     }
+                }
+            }
+
+            val previews by viewModel.videoPreviewBitmaps.collectAsStateWithLifecycle()
+            val isProcessing by viewModel.isProcessingMedia.collectAsStateWithLifecycle()
+            
+            if (previews.isNotEmpty() || isProcessing) {
+                Spacer(Modifier.height(8.dp))
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(120.dp)
+                        .clip(RoundedCornerShape(16.dp))
+                        .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(16.dp))
+                ) {
+                    MediaPreview(viewModel)
                 }
             }
         }
@@ -416,21 +399,31 @@ fun CameraPreview(
 
 @Composable
 private fun MediaPreview(viewModel: ChatScreenViewModel) {
-    val previewBitmap by viewModel.videoPreviewBitmap.collectAsStateWithLifecycle()
+    val previews by viewModel.videoPreviewBitmaps.collectAsStateWithLifecycle()
     val isProcessing by viewModel.isProcessingMedia.collectAsStateWithLifecycle()
     val processingText by viewModel.mediaProcessingProgressText.collectAsStateWithLifecycle()
 
     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        if (previewBitmap != null) {
-            Image(
-                bitmap = previewBitmap!!.asImageBitmap(),
-                contentDescription = "Media Preview",
+        if (previews.isNotEmpty()) {
+            LazyRow(
                 modifier = Modifier.fillMaxSize(),
-                contentScale = ContentScale.Crop
-            )
-            // Clear Media Button
+                contentPadding = PaddingValues(8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                items(previews) { bitmap ->
+                    Image(
+                        bitmap = bitmap.asImageBitmap(),
+                        contentDescription = "Keyframe",
+                        modifier = Modifier
+                            .fillMaxHeight()
+                            .aspectRatio(1f)
+                            .clip(RoundedCornerShape(8.dp)),
+                        contentScale = ContentScale.Crop
+                    )
+                }
+            }
             IconButton(
-                onClick = { viewModel.setVideoPreview(null) },
+                onClick = { viewModel.clearVideoFrames() },
                 modifier = Modifier.align(Alignment.TopEnd).padding(8.dp).background(MaterialTheme.colorScheme.surface.copy(alpha = 0.6f), CircleShape)
             ) {
                 Icon(FeatherIcons.X, contentDescription = "Clear", modifier = Modifier.size(16.dp))
@@ -496,7 +489,6 @@ private fun MessagesList(
     val partialResponse by viewModel.partialResponse.collectAsStateWithLifecycle()
     val isGeneratingResponse by viewModel.isGeneratingResponse.collectAsStateWithLifecycle()
 
-    // Optimized Auto-Scroll: Only scroll when new messages are added or generation starts.
     LaunchedEffect(messages.size, isGeneratingResponse) {
         if (messages.isNotEmpty()) {
             listState.animateScrollToItem(messages.size)
@@ -558,11 +550,9 @@ private fun MessagesList(
                     }
                 }
             }
-            // Spacer for the floating input
             item { Spacer(modifier = Modifier.height(80.dp)) }
         }
         
-        // Scroll to bottom button
         val showScrollToBottom by remember { derivedStateOf { listState.firstVisibleItemIndex > 2 } }
         val scope = rememberCoroutineScope()
         if (showScrollToBottom) {
@@ -675,56 +665,17 @@ private fun MessageListItem(
 
 @Composable
 private fun MessageInput(viewModel: ChatScreenViewModel) {
-    val currChat by viewModel.currChatState.collectAsStateWithLifecycle()
-    val modelLoadingState by viewModel.modelLoadState.collectAsStateWithLifecycle()
     val isGeneratingResponse by viewModel.isGeneratingResponse.collectAsStateWithLifecycle()
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    val frameSize = 384
-    val numFrames = 8
 
     val mediaPickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         if (result.resultCode == Activity.RESULT_OK) {
             result.data?.data?.let { uri ->
-                scope.launch {
-                    viewModel.setProcessingMedia(true, "Waiting for model...")
-                    viewModel.modelLoadState.first { it == ModelLoadingState.SUCCESS }
-                    viewModel.setProcessingMedia(true, "Processing...")
-                    withContext(Dispatchers.IO) {
-                        try {
-                            val mimeType = context.contentResolver.getType(uri)
-                            if (mimeType?.startsWith("video/") == true) {
-                                val videoPath = getRealPathFromURI(context, uri)
-                                if (videoPath != null) {
-                                    withContext(Dispatchers.Main) { viewModel.setProcessingMedia(true, "Extracting frames...") }
-                                    val extractor = VideoFrameExtractor(context)
-                                    val frames = extractor.extractFrames(videoPath, numFrames, frameSize)
-                                    if (frames.isNotEmpty()) {
-                                        viewModel.clearVideoFrames()
-                                        frames.forEach { viewModel.addVideoFrame(it, frameSize, frameSize) }
-                                        withContext(Dispatchers.Main) {
-                                            viewModel.setVideoPreview(rgbToBitmap(frames[0], frameSize, frameSize))
-                                            viewModel.setProcessingMedia(false)
-                                        }
-                                    }
-                                }
-                            } else {
-                                val bitmap = MediaStore.Images.Media.getBitmap(context.contentResolver, uri)
-                                val scaled = Bitmap.createScaledBitmap(bitmap, frameSize, frameSize, false)
-                                viewModel.clearVideoFrames()
-                                viewModel.addVideoFrame(bitmapToRgb(scaled), frameSize, frameSize)
-                                withContext(Dispatchers.Main) {
-                                    viewModel.setVideoPreview(scaled)
-                                    viewModel.setProcessingMedia(false)
-                                }
-                            }
-                        } catch (e: Exception) {
-                            withContext(Dispatchers.Main) {
-                                viewModel.setProcessingMedia(false)
-                                Toast.makeText(context, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
-                            }
-                        }
-                    }
+                val mimeType = context.contentResolver.getType(uri)
+                if (mimeType?.startsWith("video/") == true) {
+                    viewModel.processVideoFile(uri)
+                } else {
+                    viewModel.processImageFile(uri)
                 }
             }
         }
@@ -817,46 +768,6 @@ private fun MessageInput(viewModel: ChatScreenViewModel) {
             }
         }
     }
-}
-
-private fun getRealPathFromURI(context: Context, uri: Uri): String? {
-    return try {
-        context.contentResolver.query(uri, arrayOf(MediaStore.Images.Media.DATA), null, null, null)?.use { cursor ->
-            val columnIndex = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DATA)
-            cursor.moveToFirst()
-            cursor.getString(columnIndex)
-        }
-    } catch (e: Exception) {
-        uri.path
-    }
-}
-
-private fun bitmapToRgb(bitmap: Bitmap): ByteArray {
-    val width = bitmap.width
-    val height = bitmap.height
-    val pixels = IntArray(width * height)
-    bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
-    val bytes = ByteArray(width * height * 3)
-    for (i in pixels.indices) {
-        val pixel = pixels[i]
-        bytes[i * 3] = ((pixel shr 16) and 0xFF).toByte()
-        bytes[i * 3 + 1] = ((pixel shr 8) and 0xFF).toByte()
-        bytes[i * 3 + 2] = (pixel and 0xFF).toByte()
-    }
-    return bytes
-}
-
-private fun rgbToBitmap(bytes: ByteArray, width: Int, height: Int): Bitmap {
-    val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-    val pixels = IntArray(width * height)
-    for (i in pixels.indices) {
-        val r = bytes[i * 3].toInt() and 0xFF
-        val g = bytes[i * 3 + 1].toInt() and 0xFF
-        val b = bytes[i * 3 + 2].toInt() and 0xFF
-        pixels[i] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
-    }
-    bitmap.setPixels(pixels, 0, width, 0, 0, width, height)
-    return bitmap
 }
 
 

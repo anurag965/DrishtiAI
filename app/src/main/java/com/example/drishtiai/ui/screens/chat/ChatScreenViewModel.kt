@@ -22,6 +22,8 @@ import android.app.ActivityManager.MemoryInfo
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.net.Uri
+import android.provider.MediaStore
 import android.text.util.Linkify
 import android.util.Log
 import android.util.TypedValue
@@ -43,6 +45,7 @@ import io.noties.markwon.syntax.SyntaxHighlightPlugin
 import io.noties.prism4j.Prism4j
 import com.example.drishtiai.smollm.SmolLM
 import com.example.drishtiai.R
+import com.example.drishtiai.VideoFrameExtractor
 import com.example.drishtiai.data.AppDB
 import com.example.drishtiai.data.Chat
 import com.example.drishtiai.data.ChatMessage
@@ -126,8 +129,8 @@ class ChatScreenViewModel(
     private val _showRAMUsageLabel = MutableStateFlow(false)
     val showRAMUsageLabel: StateFlow<Boolean> = _showRAMUsageLabel
 
-    private val _videoPreviewBitmap = MutableStateFlow<Bitmap?>(null)
-    val videoPreviewBitmap: StateFlow<Bitmap?> = _videoPreviewBitmap
+    private val _videoPreviewBitmaps = MutableStateFlow<List<Bitmap>>(emptyList())
+    val videoPreviewBitmaps: StateFlow<List<Bitmap>> = _videoPreviewBitmaps
 
     private val _isProcessingMedia = MutableStateFlow(false)
     val isProcessingMedia: StateFlow<Boolean> = _isProcessingMedia
@@ -147,6 +150,10 @@ class ChatScreenViewModel(
     val markwon: Markwon
 
     private var activityManager: ActivityManager
+    private val videoFrameExtractor by lazy { VideoFrameExtractor(context) }
+    
+    // Speed Optimization: Use 224 for mobile VLM inference
+    private val INFERENCE_IMAGE_SIZE = 224 
 
     init {
         _currChatState.value = appDB.loadDefaultChat()
@@ -494,8 +501,8 @@ class ChatScreenViewModel(
         _showRAMUsageLabel.value = !_showRAMUsageLabel.value
     }
 
-    fun setVideoPreview(bitmap: Bitmap?) {
-        _videoPreviewBitmap.value = bitmap
+    fun setVideoPreviewBitmaps(bitmaps: List<Bitmap>) {
+        _videoPreviewBitmaps.value = bitmaps
     }
 
     fun setProcessingMedia(processing: Boolean, text: String = "") {
@@ -512,13 +519,17 @@ class ChatScreenViewModel(
     fun clearVideoFrames() {
         viewModelScope.launch(Dispatchers.IO) {
             smolLMManager.clearFrames()
+            _videoPreviewBitmaps.value = emptyList()
+            lastFrameThumbnail = null
+            lastStaticFrameThumbnail = null
         }
     }
 
     private val _liveQuery = mutableStateOf("")
-    private var lastInferenceQuery = ""
     private var lastFrameTime = 0L
     private var lastFrameThumbnail: ByteArray? = null
+    private var lastStaticFrameThumbnail: ByteArray? = null
+    private var staticFrameStartTime = 0L
     private val isProcessingFrame = AtomicBoolean(false)
 
     fun setLiveQuery(query: String) {
@@ -526,46 +537,132 @@ class ChatScreenViewModel(
     }
 
     fun onLiveFrame(bitmap: Bitmap) {
-        val currentQuery = _liveQuery.value
-        val queryChanged = currentQuery != lastInferenceQuery
-        
-        if (currentQuery.isEmpty() || _isGeneratingResponse.value) {
-            return
-        }
+        if (_isGeneratingResponse.value) return
 
         val currentTime = System.currentTimeMillis()
-        if (!queryChanged && currentTime - lastFrameTime < 2000) { 
-            return
-        }
+        
+        // Sampling rate for stability check (faster: 250ms)
+        if (currentTime - lastFrameTime < 250) return 
+        lastFrameTime = currentTime
 
         if (isProcessingFrame.compareAndSet(false, true)) {
             viewModelScope.launch {
                 try {
-                    val result = withContext(Dispatchers.Default) {
-                        val thumbnail = getThumbnail(bitmap)
-                        val cameraMoved = lastFrameThumbnail == null || !isSimilar(thumbnail, lastFrameThumbnail!!)
-                        
-                        if (!cameraMoved && !queryChanged) {
-                            return@withContext null
-                        }
-                        
-                        lastFrameThumbnail = thumbnail
-                        if (cameraMoved) lastFrameTime = currentTime
-                        
-                        val scaledBitmap = Bitmap.createScaledBitmap(bitmap, 384, 384, false)
-                        bitmapToRgb(scaledBitmap)
+                    val currentThumbnail = withContext(Dispatchers.Default) { getThumbnail(bitmap) }
+                    
+                    // Stability Check Logic:
+                    // 1. Compare current frame with the immediate previous one to see if camera is MOVING
+                    // threshold relaxed to 0.12 for more natural phone movement
+                    val isMoving = lastStaticFrameThumbnail != null && !isSimilar(currentThumbnail, lastStaticFrameThumbnail!!, threshold = 0.12)
+                    
+                    if (isMoving) {
+                        // Camera is moving, reset the stability timer
+                        staticFrameStartTime = currentTime
+                        lastStaticFrameThumbnail = currentThumbnail
+                        return@launch
                     }
 
-                    if (result != null && !_isGeneratingResponse.value) {
-                        lastInferenceQuery = currentQuery
-                        withContext(Dispatchers.IO) {
-                            smolLMManager.addVideoFrameRGB(result, 384, 384)
+                    // 2. If camera is NOT moving, check how long it has been still
+                    val stillnessDuration = currentTime - staticFrameStartTime
+                    
+                    // 3. If camera has been still for > 400ms (faster!), it's a good candidate for a keyframe
+                    if (stillnessDuration > 400) {
+                        // 4. Finally, ensure this stable frame is DIFFERENT from our last captured keyframe
+                        val isNewScene = lastFrameThumbnail == null || !isSimilar(currentThumbnail, lastFrameThumbnail!!, threshold = 0.22)
+                        
+                        if (isNewScene) {
+                            val scaledBitmap = withContext(Dispatchers.Default) {
+                                Bitmap.createScaledBitmap(bitmap, INFERENCE_IMAGE_SIZE, INFERENCE_IMAGE_SIZE, false)
+                            }
+                            val result = withContext(Dispatchers.Default) { bitmapToRgb(scaledBitmap) }
+
+                            withContext(Dispatchers.IO) {
+                                lastFrameThumbnail = currentThumbnail
+                                staticFrameStartTime = currentTime // Reset to avoid double capture
+                                
+                                val currentFrames = _videoPreviewBitmaps.value.toMutableList()
+                                if (currentFrames.size >= 4) {
+                                    currentFrames.removeAt(0)
+                                    smolLMManager.clearFrames()
+                                    currentFrames.forEach { bmp ->
+                                        smolLMManager.addVideoFrameRGB(bitmapToRgb(bmp), INFERENCE_IMAGE_SIZE, INFERENCE_IMAGE_SIZE)
+                                    }
+                                }
+                                currentFrames.add(scaledBitmap)
+                                _videoPreviewBitmaps.value = currentFrames
+                                smolLMManager.addVideoFrameRGB(result, INFERENCE_IMAGE_SIZE, INFERENCE_IMAGE_SIZE)
+                            }
                         }
-                        val enhancedQuery = "Describe only the real objects present in the video frames. Be objective and do not invent people, scenarios, or events that are not explicitly visible. The user's request is: '$currentQuery'"
-                        sendUserQuery(enhancedQuery, addMessageToDB = false, clearResponse = false)
                     }
+                    
+                    lastStaticFrameThumbnail = currentThumbnail
                 } finally {
                     isProcessingFrame.set(false)
+                }
+            }
+        }
+    }
+
+    fun processVideoFile(uri: Uri) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                withContext(Dispatchers.Main) {
+                    setProcessingMedia(true, "Extracting keyframes...")
+                }
+                
+                smolLMManager.clearFrames()
+                val frames = videoFrameExtractor.extractFrames(uri, numFrames = 4, targetSize = INFERENCE_IMAGE_SIZE)
+                
+                if (frames.isNotEmpty()) {
+                    val bitmaps = frames.map { rgbToBitmap(it, INFERENCE_IMAGE_SIZE, INFERENCE_IMAGE_SIZE) }
+                    withContext(Dispatchers.Main) {
+                        setVideoPreviewBitmaps(bitmaps)
+                    }
+                    
+                    for (frame in frames) {
+                        smolLMManager.addVideoFrameRGB(frame, INFERENCE_IMAGE_SIZE, INFERENCE_IMAGE_SIZE)
+                    }
+                    
+                    withContext(Dispatchers.Main) {
+                        setProcessingMedia(false, "Video loaded (${frames.size} keyframes)")
+                        Toast.makeText(context, "Keyframes extracted successfully", Toast.LENGTH_SHORT).show()
+                    }
+                } else {
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(context, "No keyframes could be extracted", Toast.LENGTH_SHORT).show()
+                        setProcessingMedia(false)
+                    }
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(context, "Error processing video: ${e.message}", Toast.LENGTH_SHORT).show()
+                    setProcessingMedia(false)
+                }
+            }
+        }
+    }
+
+    fun processImageFile(uri: Uri) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                withContext(Dispatchers.Main) {
+                    setProcessingMedia(true, "Processing image...")
+                }
+                
+                val bitmap = MediaStore.Images.Media.getBitmap(context.contentResolver, uri)
+                val scaled = Bitmap.createScaledBitmap(bitmap, INFERENCE_IMAGE_SIZE, INFERENCE_IMAGE_SIZE, false)
+                
+                smolLMManager.clearFrames()
+                smolLMManager.addVideoFrameRGB(bitmapToRgb(scaled), INFERENCE_IMAGE_SIZE, INFERENCE_IMAGE_SIZE)
+                
+                withContext(Dispatchers.Main) {
+                    setVideoPreviewBitmaps(listOf(scaled))
+                    setProcessingMedia(false, "Image loaded")
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(context, "Error processing image: ${e.message}", Toast.LENGTH_SHORT).show()
+                    setProcessingMedia(false)
                 }
             }
         }
@@ -576,12 +673,13 @@ class ChatScreenViewModel(
         return bitmapToRgb(scaled)
     }
 
-    private fun isSimilar(f1: ByteArray, f2: ByteArray, threshold: Double = 0.05): Boolean {
+    private fun isSimilar(f1: ByteArray, f2: ByteArray, threshold: Double = 0.20): Boolean {
         var diff = 0.0
         for (i in f1.indices) {
-            diff += abs(f1[i].toInt() - f2[i].toInt())
+            // Fix: Use 'and 0xFF' to treat as unsigned bytes (0-255)
+            diff += abs((f1[i].toInt() and 0xFF) - (f2[i].toInt() and 0xFF))
         }
-        return (diff / (f1.size * 255)) < threshold
+        return (diff / (f1.size * 255.0)) < threshold
     }
 
     private fun bitmapToRgb(bitmap: Bitmap): ByteArray {
@@ -597,5 +695,18 @@ class ChatScreenViewModel(
             bytes[i * 3 + 2] = (pixel and 0xFF).toByte()
         }
         return bytes
+    }
+
+    private fun rgbToBitmap(bytes: ByteArray, width: Int, height: Int): Bitmap {
+        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        val pixels = IntArray(width * height)
+        for (i in pixels.indices) {
+            val r = bytes[i * 3].toInt() and 0xFF
+            val g = bytes[i * 3 + 1].toInt() and 0xFF
+            val b = bytes[i * 3 + 2].toInt() and 0xFF
+            pixels[i] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+        }
+        bitmap.setPixels(pixels, 0, width, 0, 0, width, height)
+        return bitmap
     }
 }

@@ -7,16 +7,29 @@
 
     <Button
         android:id="@+id/select_video_button"
-        android:layout_width="wrap_content"
+        android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="Select Video" />
+        android:text="1. Select Video" />
+
+    <EditText
+        android:id="@+id/query_edit_text"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:hint="2. Ask a question about the video..."
+        android:layout_marginTop="8dp" />
+
+    <Button
+        android:id="@+id/generate_button"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="3. Generate Answer"
+        android:layout_marginTop="8dp" />
 
     <ProgressBar
         android:id="@+id/progress_bar"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="16dp"
-        android:indeterminate="false"
         android:visibility="gone" />
 
     <ImageView
@@ -24,7 +37,8 @@
         android:layout_width="match_parent"
         android:layout_height="200dp"
         android:layout_marginTop="16dp"
-        android:visibility="gone" />
+        android:background="#EEE"
+        android:scaleType="centerInside" />
 
     <ScrollView
         android:layout_width="match_parent"
@@ -35,7 +49,7 @@
             android:id="@+id/caption_text_view"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Select a video to generate description"
+            android:text="Results will appear here..."
             android:textSize="16sp" />
 
     </ScrollView>
