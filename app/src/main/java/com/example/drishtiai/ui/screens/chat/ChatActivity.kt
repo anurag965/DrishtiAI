@@ -49,7 +49,6 @@ import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
@@ -106,9 +105,6 @@ import kotlinx.serialization.Serializable
 import org.koin.android.ext.android.inject
 import java.util.*
 import java.util.concurrent.Executors
-import kotlin.math.abs
-import kotlin.math.max
-import kotlin.math.min
 import kotlin.reflect.typeOf
 
 private const val LOGTAG = "[ChatActivity-Kt]"
@@ -408,7 +404,7 @@ fun CameraPreview(
 @Composable
 private fun MediaPreview(viewModel: ChatScreenViewModel) {
     val previews by viewModel.videoPreviewBitmaps.collectAsStateWithLifecycle()
-    val detectedCrises by viewModel.detectedCrises.collectAsStateWithLifecycle()
+    val allDetections by viewModel.detections.collectAsStateWithLifecycle()
     val isProcessing by viewModel.isProcessingMedia.collectAsStateWithLifecycle()
     val processingText by viewModel.mediaProcessingProgressText.collectAsStateWithLifecycle()
 
@@ -419,7 +415,7 @@ private fun MediaPreview(viewModel: ChatScreenViewModel) {
                 contentPadding = PaddingValues(8.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                items(previews) { bitmap ->
+                itemsIndexed(previews) { index, bitmap ->
                     Box(modifier = Modifier
                         .fillMaxHeight()
                         .aspectRatio(1f)
@@ -431,41 +427,31 @@ private fun MediaPreview(viewModel: ChatScreenViewModel) {
                             contentScale = ContentScale.Crop
                         )
                         
-                        // Overlay Bounding Boxes
+                        // DRAW YOLOv8 BOXES
                         Canvas(modifier = Modifier.fillMaxSize()) {
-                            detectedCrises.forEach { crisis ->
-                                val box = crisis.boundingBox
-                                
-                                // Fix: coordinates are sometimes swapped or out of order
-                                val xMin = min(box[0], box[2])
-                                val xMax = max(box[0], box[2])
-                                val yMin = min(box[1], box[3])
-                                val yMax = max(box[1], box[3])
-
-                                // Coordinates mapping (assumes 0-1000 scale)
-                                val left = (xMin / 1000f) * size.width
-                                val top = (yMin / 1000f) * size.height
-                                val width = ((xMax - xMin) / 1000f) * size.width
-                                val height = ((yMax - yMin) / 1000f) * size.height
+                            val frameDetections = allDetections.getOrNull(index)
+                            frameDetections?.forEach { detection ->
+                                val left = detection.x1 * size.width
+                                val top = detection.y1 * size.height
+                                val right = detection.x2 * size.width
+                                val bottom = detection.y2 * size.height
                                 
                                 drawRect(
                                     color = Color.Red,
                                     topLeft = Offset(left, top),
-                                    size = Size(width, height),
+                                    size = Size(right - left, bottom - top),
                                     style = Stroke(width = 2.dp.toPx())
                                 )
 
-                                // Draw Class Name Label
                                 val paint = Paint().apply {
-                                    color = Color.Red.toArgb()
+                                    color = android.graphics.Color.RED
                                     textSize = 12.sp.toPx()
                                     isAntiAlias = true
-                                    style = Paint.Style.FILL
                                 }
                                 drawContext.canvas.nativeCanvas.drawText(
-                                    crisis.className,
+                                    "${detection.label} ${(detection.confidence * 100).toInt()}%",
                                     left,
-                                    max(top - 5.dp.toPx(), 15.dp.toPx()),
+                                    if (top > 20) top - 5 else top + 20,
                                     paint
                                 )
                             }

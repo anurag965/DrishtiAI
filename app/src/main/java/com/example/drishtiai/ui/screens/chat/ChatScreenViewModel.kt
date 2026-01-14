@@ -54,11 +54,14 @@ import com.example.drishtiai.llm.ModelsRepository
 import com.example.drishtiai.llm.SmolLMManager
 import com.example.drishtiai.prism4j.PrismGrammarLocator
 import com.example.drishtiai.ui.components.createAlertDialog
+import com.example.drishtiai.detection.YOLOv8Detector
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.koin.android.annotation.KoinViewModel
@@ -67,13 +70,14 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
 import kotlin.math.pow
 
-data class DetectedCrisis(
-    val className: String,
-    val boundingBox: List<Float> // [x1, y1, x2, y2] normalized 0-1000
+data class DetectionResult(
+    val label: String,
+    val x1: Float,
+    val y1: Float,
+    val x2: Float,
+    val y2: Float,
+    val confidence: Float
 )
-
-private const val LOGTAG = "[SmolLMAndroid-Kt]"
-private val LOGD: (String) -> Unit = { Log.d(LOGTAG, it) }
 
 sealed class ChatScreenUIEvent {
     data object Idle : ChatScreenUIEvent()
@@ -97,13 +101,12 @@ class ChatScreenViewModel(
     val smolLMManager: SmolLMManager,
 ) : ViewModel() {
     enum class ModelLoadingState {
-        NOT_LOADED, // model loading not started
-        IN_PROGRESS, // model loading in-progress
-        SUCCESS, // model loading finished successfully
-        FAILURE, // model loading failed
+        NOT_LOADED, 
+        IN_PROGRESS, 
+        SUCCESS, 
+        FAILURE, 
     }
 
-    // UI state variables
     private val _currChatState = MutableStateFlow<Chat?>(null)
     val currChatState: StateFlow<Chat?> = _currChatState
 
@@ -137,8 +140,8 @@ class ChatScreenViewModel(
     private val _videoPreviewBitmaps = MutableStateFlow<List<Bitmap>>(emptyList())
     val videoPreviewBitmaps: StateFlow<List<Bitmap>> = _videoPreviewBitmaps
 
-    private val _detectedCrises = MutableStateFlow<List<DetectedCrisis>>(emptyList())
-    val detectedCrises: StateFlow<List<DetectedCrisis>> = _detectedCrises
+    private val _detections = MutableStateFlow<List<List<DetectionResult>>>(emptyList())
+    val detections: StateFlow<List<List<DetectionResult>>> = _detections
 
     private val _isProcessingMedia = MutableStateFlow(false)
     val isProcessingMedia: StateFlow<Boolean> = _isProcessingMedia
@@ -146,20 +149,19 @@ class ChatScreenViewModel(
     private val _mediaProcessingProgressText = MutableStateFlow("")
     val mediaProcessingProgressText: StateFlow<String> = _mediaProcessingProgressText
 
-    // Used to pre-set a value in the query text-field of the chat screen
     var questionTextDefaultVal: String? = null
 
     private val findThinkTagRegex = Regex("<think>(.*?)</think>", RegexOption.DOT_MATCHES_ALL)
-    
-    // Support formats: [Fight] [100, 200, 300, 400] OR [100, 200, 300, 400]
-    private val boundingBoxRegex = Regex("\\[(.*?)\\]\\s*[\\[\\(]?(\\d+),\\s*(\\d+),\\s*(\\d+),\\s*(\\d+)[\\)\\]]?|\\[(\\d+),\\s*(\\d+),\\s*(\\d+),\\s*(\\d+)\\]")
-    
     var responseGenerationsSpeed: Float? = null
     var responseGenerationTimeSecs: Int? = null
     val markwon: Markwon
 
     private var activityManager: ActivityManager
     private val videoFrameExtractor by lazy { VideoFrameExtractor(context) }
+    
+    // NEW: YOLOv8 Detector
+    private val yoloDetector by lazy { YOLOv8Detector(context, "yolov8n_float16.tflite") }
+    
     private val INFERENCE_IMAGE_SIZE = 224 
 
     init {
@@ -259,86 +261,107 @@ class ChatScreenViewModel(
     }
 
     fun sendUserQuery(query: String, addMessageToDB: Boolean = true, clearResponse: Boolean = true) {
-        _currChatState.value?.let { chat ->
-            chat.dateUsed = Date()
-            appDB.updateChat(chat)
+        viewModelScope.launch {
+            while (_isProcessingMedia.value) {
+                delay(100)
+            }
 
-            if (chat.isTask) appDB.deleteMessages(chat.id)
-            if (addMessageToDB) appDB.addUserMessage(chat.id, query)
-            
-            _isGeneratingResponse.value = true
-            if (clearResponse) _partialResponse.value = ""
-            _detectedCrises.value = emptyList()
+            _currChatState.value?.let { chat ->
+                chat.dateUsed = Date()
+                appDB.updateChat(chat)
 
-            val model = modelsRepository.getModelFromId(chat.llmModelId)
-            if (model != null && model.mmProjPath.isNotEmpty()) {
-                smolLMManager.getResponseMultimodal(
-                    query,
-                    onPartialResponseGenerated = {
-                        CoroutineScope(Dispatchers.Main).launch {
-                            _partialResponse.value = it
-                            parseDetectedCrises(it)
+                if (chat.isTask) appDB.deleteMessages(chat.id)
+                
+                // Clear previous results before starting
+                if (clearResponse) _partialResponse.value = ""
+                _isGeneratingResponse.value = true
+
+                // 1. Format YOLO detections text
+                val detectionText = StringBuilder()
+                val currentDetections = _detections.value
+                if (currentDetections.isNotEmpty()) {
+                    currentDetections.forEachIndexed { frameIndex, frameDetections ->
+                        if (frameDetections.isNotEmpty()) {
+                            detectionText.append("Frame ${frameIndex + 1}:\n")
+                            frameDetections.forEachIndexed { detIndex, detection ->
+                                detectionText.append("${detection.label}, ${(detection.x1 * 1000).toInt()}, ${(detection.y1 * 1000).toInt()}, ${(detection.x2 * 1000).toInt()}, ${(detection.y2 * 1000).toInt()}\n")
+                            }
+                            detectionText.append("\n")
                         }
-                    },
-                    onSuccess = { response ->
-                        _isGeneratingResponse.value = false
-                        if (addMessageToDB) appDB.addAssistantMessage(chat.id, response)
-                        if (clearResponse) _partialResponse.value = ""
-                    },
-                    onCancelled = { final ->
-                        _isGeneratingResponse.value = false
-                        if (addMessageToDB && final.isNotEmpty()) appDB.addAssistantMessage(chat.id, final)
-                    },
-                    onError = { exception ->
-                        _isGeneratingResponse.value = false
-                        if (addMessageToDB) Toast.makeText(context, "Error: ${exception.message}", Toast.LENGTH_SHORT).show()
                     }
-                )
-            } else {
-                var accumulatedResponse = ""
-                smolLMManager.getResponse(
-                    query,
-                    responseTransform = { it },
-                    onPartialResponseGenerated = {
-                        CoroutineScope(Dispatchers.Main).launch {
-                            accumulatedResponse = it
-                            _partialResponse.value = it
-                        }
-                    },
-                    onSuccess = { response ->
-                        _isGeneratingResponse.value = false
-                        responseGenerationsSpeed = response.generationSpeed
-                        responseGenerationTimeSecs = response.generationTimeSecs
-                        appDB.updateChat(chat.copy(contextSizeConsumed = response.contextLengthUsed))
-                    },
-                    onCancelled = { _isGeneratingResponse.value = false },
-                    onError = { _isGeneratingResponse.value = false },
-                )
-            }
-        }
-    }
+                }
 
-    private fun parseDetectedCrises(text: String) {
-        val crises = mutableListOf<DetectedCrisis>()
-        boundingBoxRegex.findAll(text).forEach { match ->
-            if (match.groupValues[2].isNotEmpty()) {
-                // Format: [Class] [x1, y1, x2, y2]
-                val className = match.groupValues[1]
-                val x1 = match.groupValues[2].toFloat()
-                val y1 = match.groupValues[3].toFloat()
-                val x2 = match.groupValues[4].toFloat()
-                val y2 = match.groupValues[5].toFloat()
-                crises.add(DetectedCrisis(className, listOf(x1, y1, x2, y2)))
-            } else if (match.groupValues[6].isNotEmpty()) {
-                // Format: [x1, y1, x2, y2]
-                val x1 = match.groupValues[6].toFloat()
-                val y1 = match.groupValues[7].toFloat()
-                val x2 = match.groupValues[8].toFloat()
-                val y2 = match.groupValues[9].toFloat()
-                crises.add(DetectedCrisis("Detection", listOf(x1, y1, x2, y2)))
+                val finalUserQuery = if (detectionText.isNotEmpty()) {
+                    "Detection Results:\n$detectionText\nUser Question: $query"
+                } else {
+                    query
+                }
+
+                if (addMessageToDB) {
+                    appDB.addUserMessage(chat.id, query)
+                }
+
+                val model = modelsRepository.getModelFromId(chat.llmModelId)
+                if (model != null && model.mmProjPath.isNotEmpty()) {
+                    smolLMManager.getResponseMultimodal(
+                        query, // Send original query to VLM, but VLM sees the images
+                        onPartialResponseGenerated = {
+                            CoroutineScope(Dispatchers.Main).launch {
+                                // Prepend detection text if available
+                                if (detectionText.isNotEmpty()) {
+                                    _partialResponse.value = "YOLO Detections:\n$detectionText\n---\n$it"
+                                } else {
+                                    _partialResponse.value = it
+                                }
+                            }
+                        },
+                        onSuccess = { response ->
+                            _isGeneratingResponse.value = false
+                            val finalResponse = if (detectionText.isNotEmpty()) {
+                                "YOLO Detections:\n$detectionText\n---\n$response"
+                            } else {
+                                response
+                            }
+                            if (addMessageToDB) appDB.addAssistantMessage(chat.id, finalResponse)
+                            if (clearResponse) _partialResponse.value = ""
+                        },
+                        onCancelled = { final ->
+                            _isGeneratingResponse.value = false
+                            val finalResponse = if (detectionText.isNotEmpty()) {
+                                "YOLO Detections:\n$detectionText\n---\n$final"
+                            } else {
+                                final
+                            }
+                            if (addMessageToDB && finalResponse.isNotEmpty()) appDB.addAssistantMessage(chat.id, finalResponse)
+                        },
+                        onError = { exception ->
+                            _isGeneratingResponse.value = false
+                            if (addMessageToDB) Toast.makeText(context, "Error: ${exception.message}", Toast.LENGTH_SHORT).show()
+                        }
+                    )
+                } else {
+                    var accumulatedResponseText = ""
+                    smolLMManager.getResponse(
+                        query,
+                        responseTransform = { it },
+                        onPartialResponseGenerated = {
+                            CoroutineScope(Dispatchers.Main).launch {
+                                accumulatedResponseText = it
+                                _partialResponse.value = it
+                            }
+                        },
+                        onSuccess = { response ->
+                            _isGeneratingResponse.value = false
+                            responseGenerationsSpeed = response.generationSpeed
+                            responseGenerationTimeSecs = response.generationTimeSecs
+                            appDB.updateChat(chat.copy(contextSizeConsumed = response.contextLengthUsed))
+                        },
+                        onCancelled = { _isGeneratingResponse.value = false },
+                        onError = { _isGeneratingResponse.value = false },
+                    )
+                }
             }
         }
-        _detectedCrises.value = crises
     }
 
     fun stopGeneration() {
@@ -447,7 +470,23 @@ class ChatScreenViewModel(
     }
 
     fun toggleRAMUsageLabelVisibility() = run { _showRAMUsageLabel.value = !_showRAMUsageLabel.value }
-    fun setVideoPreviewBitmaps(bitmaps: List<Bitmap>) { _videoPreviewBitmaps.value = bitmaps }
+    
+    fun setVideoPreviewBitmaps(bitmaps: List<Bitmap>) { 
+        _videoPreviewBitmaps.value = bitmaps
+        runDetections(bitmaps)
+    }
+
+    private fun runDetections(bitmaps: List<Bitmap>) {
+        viewModelScope.launch(Dispatchers.Default) {
+            val allDetections = bitmaps.map { bitmap ->
+                yoloDetector.detect(bitmap).map { 
+                    DetectionResult(it.label, it.x1, it.y1, it.x2, it.y2, it.confidence)
+                }
+            }
+            _detections.value = allDetections
+        }
+    }
+
     fun setProcessingMedia(processing: Boolean, text: String = "") {
         _isProcessingMedia.value = processing
         _mediaProcessingProgressText.value = text
@@ -461,7 +500,7 @@ class ChatScreenViewModel(
         viewModelScope.launch(Dispatchers.IO) {
             smolLMManager.clearFrames()
             _videoPreviewBitmaps.value = emptyList()
-            _detectedCrises.value = emptyList()
+            _detections.value = emptyList()
             lastFrameThumbnail = null
             lastStaticFrameThumbnail = null
         }
@@ -515,7 +554,10 @@ class ChatScreenViewModel(
                                     }
                                 }
                                 currentFrames.add(scaledBitmap)
-                                _videoPreviewBitmaps.value = currentFrames
+                                withContext(Dispatchers.Main) {
+                                    _videoPreviewBitmaps.value = currentFrames
+                                    runDetections(currentFrames)
+                                }
                                 smolLMManager.addVideoFrameRGB(result, INFERENCE_IMAGE_SIZE, INFERENCE_IMAGE_SIZE)
                             }
                         }
